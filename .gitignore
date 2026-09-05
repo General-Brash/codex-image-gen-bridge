@@ -1,0 +1,16 @@
+# Python
+__pycache__/
+*.py[cod]
+
+# Local macOS files
+.DS_Store
+
+# Local credentials and environment files
+.env
+.env.*
+!.env.example
+
+# Generated image output
+storage/generated-images/
+generated/
+outputs/
