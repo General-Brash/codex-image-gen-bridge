@@ -14,3 +14,14 @@ __pycache__/
 storage/generated-images/
 generated/
 outputs/
+
+# Private configuration and release/build outputs
+auth.json
+config.toml
+*.pem
+*.key
+output/
+tmp/
+dist/
+.coverage
+htmlcov/
