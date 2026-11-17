@@ -1,4 +1,6 @@
 interface:
   display_name: "Image Gen Bridge"
-  short_description: "Gateway-bound image generation, editing and diagnostics"
-  default_prompt: "Use $codex-image-gen-bridge to generate or edit an image through my configured gateway, preserving the requested model and dimensions and reporting actionable errors."
+  short_description: "Default GPT Image 2.6 via your Codex API gateway"
+  default_prompt: "Use $codex-image-gen-bridge to generate or edit an image through my current Codex-configured API gateway, defaulting to gpt-image-2.6 while preserving any model and dimensions I explicitly request."
+policy:
+  allow_implicit_invocation: true

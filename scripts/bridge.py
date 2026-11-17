@@ -28,7 +28,8 @@ try:
 except ModuleNotFoundError:  # Keep --help/--version usable on older interpreters.
     tomllib = None
 
-VERSION = "1.1.0"
+VERSION = "1.2.0"
+DEFAULT_MODEL = "gpt-image-2.6"
 DEFAULT_USER_AGENT = (
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
     "AppleWebKit/537.36 Chrome/140.0 Safari/537.36"
@@ -75,6 +76,8 @@ class GatewayConfig:
     provider: str = ""
     key_source: str = ""
     wire_api: str | None = None
+    config_source: str = "codex"
+    profile: str | None = None
 
     def summary(self) -> dict:
         return {
@@ -83,6 +86,8 @@ class GatewayConfig:
             "key_source": self.key_source,
             "codex_wire_api": self.wire_api,
             "image_api": "images",
+            "config_source": self.config_source,
+            "codex_profile": self.profile,
         }
 
 
@@ -129,6 +134,52 @@ def read_toml(path: Path) -> dict:
         raise BridgeError("configuration", f"Codex config file not found: {path}") from None
     except (tomllib.TOMLDecodeError, UnicodeError):
         raise BridgeError("configuration", "Invalid config.toml; check TOML syntax without sharing secrets.") from None
+
+
+def merge_config_layers(base: dict, layer: dict) -> dict:
+    merged = dict(base)
+    for name, value in layer.items():
+        if isinstance(value, dict) and isinstance(merged.get(name), dict):
+            merged[name] = merge_config_layers(merged[name], value)
+        else:
+            merged[name] = value
+    return merged
+
+
+def load_codex_config(home: Path, profile: str | None = None, requested: str | None = None) -> dict:
+    config = read_toml(home / "config.toml")
+    if profile is not None:
+        if not re.fullmatch(r"[A-Za-z0-9_-]+", profile):
+            raise BridgeError("configuration", "Profile names must contain only letters, numbers, hyphens, and underscores.")
+        layer = read_toml(home / f"{profile}.config.toml")
+        merged = merge_config_layers(config, layer)
+        name, entry = select_provider(merged, requested)
+        original_providers = config.get("model_providers", {})
+        original_entry = original_providers.get(name, {}) if isinstance(original_providers, dict) else {}
+        layer_providers = layer.get("model_providers", {})
+        layer_entry = layer_providers.get(name, {}) if isinstance(layer_providers, dict) else {}
+        if not isinstance(original_entry, dict):
+            original_entry = {}
+        if not isinstance(layer_entry, dict):
+            layer_entry = {}
+        credential_fields = ("env_key", "experimental_bearer_token")
+        if ("experimental_bearer_token" in layer_entry and "env_key" not in layer_entry
+                and entry.get("env_key") is not None):
+            raise BridgeError("configuration", "Profile bearer token conflicts with an inherited env_key; use a separate provider or explicitly configure its matching env_key.")
+        if (original_entry.get("base_url")
+                and normalize_base_url(original_entry["base_url"]) != normalize_base_url(entry["base_url"])
+                and not any(field in layer_entry for field in credential_fields)):
+            raise BridgeError("configuration", "Profile changes the API base URL without an explicit matching provider credential; inherited credentials will not be reused.")
+        if not any(entry.get(field) is not None for field in credential_fields):
+            try:
+                original_name, original_active = select_provider(config)
+            except BridgeError:
+                original_name, original_active = None, {}
+            if (name != original_name
+                    or normalize_base_url(entry["base_url"]) != normalize_base_url(original_active["base_url"])):
+                raise BridgeError("configuration", "Profile changes the provider or API base URL without its own credential; auth.json will not be reused.")
+        config = merged
+    return config
 
 
 def select_provider(config: dict, requested: str | None = None) -> tuple[str, dict]:
@@ -198,15 +249,17 @@ def validate_header(value: str, label: str) -> str:
     return value
 
 
-def load_gateway(home: Path, requested: str | None = None) -> GatewayConfig:
-    override_url = os.environ.get(BASE_URL_ENV, "").strip()
-    override_key = os.environ.get(API_KEY_ENV, "").strip()
-    if override_url or override_key:
-        if not override_url or not override_key or requested:
-            raise BridgeError("configuration", f"Set {BASE_URL_ENV} and {API_KEY_ENV} together; do not combine this pair with --provider.")
+def load_gateway(home: Path, requested: str | None = None, *, source: str = "codex", profile: str | None = None) -> GatewayConfig:
+    if source == "environment":
+        override_url = os.environ.get(BASE_URL_ENV, "").strip()
+        override_key = os.environ.get(API_KEY_ENV, "").strip()
+        if not override_url or not override_key or requested or profile is not None:
+            raise BridgeError("configuration", f"Set {BASE_URL_ENV} and {API_KEY_ENV} together; do not combine environment mode with --provider or --profile.")
         return GatewayConfig(normalize_base_url(override_url), validate_header(override_key, "API key"),
-                             "environment", API_KEY_ENV)
-    config = read_toml(home / "config.toml")
+                             "environment", API_KEY_ENV, config_source="environment")
+    if source != "codex":
+        raise BridgeError("configuration", "Config source must be codex or environment.")
+    config = load_codex_config(home, profile, requested)
     name, entry = select_provider(config, requested)
     base_url = normalize_base_url(entry["base_url"])
     env_key = entry.get("env_key")
@@ -217,18 +270,24 @@ def load_gateway(home: Path, requested: str | None = None) -> GatewayConfig:
         source = f"env:{env_key}"
         if not key:
             raise BridgeError("configuration", f"Provider credential variable {env_key} is unset; auth.json will not be substituted.")
+    elif entry.get("experimental_bearer_token") is not None:
+        token = entry["experimental_bearer_token"]
+        if not isinstance(token, str) or not token.strip():
+            raise BridgeError("configuration", "Provider experimental_bearer_token must be a non-empty string.")
+        key = token.strip()
+        source = f"provider:{name}.experimental_bearer_token"
     else:
         active = config.get("model_provider")
         if requested and requested != active:
-            raise BridgeError("configuration", "An explicitly selected non-active provider requires its own env_key; active-provider credentials will not be reused.")
+            raise BridgeError("configuration", "An explicitly selected non-active provider requires its own env_key or experimental_bearer_token; active-provider credentials will not be reused.")
         key = read_api_key(home / "auth.json")
         source = "auth.json:API_KEY"
         if not key:
-            raise BridgeError("configuration", "No API key in auth.json. Configure a provider env_key; OAuth access/refresh tokens cannot be used as API keys.")
+            raise BridgeError("configuration", "No provider API credential. Configure env_key or experimental_bearer_token, or an API key in auth.json; OAuth access/refresh tokens cannot be used as API keys.")
     wire_api = entry.get("wire_api")
     if wire_api is not None and not isinstance(wire_api, str):
         raise BridgeError("configuration", "Provider wire_api must be a string when present.")
-    return GatewayConfig(base_url, validate_header(key, "API key"), name, source, wire_api)
+    return GatewayConfig(base_url, validate_header(key, "API key"), name, source, wire_api, profile=profile)
 
 
 def map_size(size: str) -> str:
@@ -481,19 +540,23 @@ def load_images(values: list[str]) -> list[tuple[str, str, bytes, str]]:
     return images
 
 
-def call_image_generate(endpoint: str, api_key: str, model: str, prompt: str, size: str, quality: str | None = None, **options) -> HTTPResult:
+def call_image_generate(endpoint: str, api_key: str, model: str, prompt: str, size: str, quality: str | None = None, *, complexity: str | None = None, **options) -> HTTPResult:
     payload = {"model": model, "prompt": prompt, "n": 1, "size": map_size(size)}
     if quality:
         payload["quality"] = quality
+    if complexity:
+        payload["complexity"] = complexity
     return post_json(endpoint, api_key, payload, **options)
 
 
-def call_image_edit(endpoint: str, api_key: str, model: str, prompt: str, images, size: str, quality: str | None = None, **options) -> HTTPResult:
+def call_image_edit(endpoint: str, api_key: str, model: str, prompt: str, images, size: str, quality: str | None = None, *, complexity: str | None = None, **options) -> HTTPResult:
     if isinstance(images, str):  # Preserve single-image helper compatibility.
         images = load_images([images])
     fields = {"model": model, "prompt": prompt, "n": "1", "size": map_size(size)}
     if quality:
         fields["quality"] = quality
+    if complexity:
+        fields["complexity"] = complexity
     return post_multipart(endpoint, api_key, fields, images, **options)
 
 
@@ -561,12 +624,16 @@ def parser() -> argparse.ArgumentParser:
     command.add_argument("--mode", choices=["generate", "edit"], default="generate")
     command.add_argument("--image", action="append", default=[], help="Reference image path or data URL; repeat for multiple references")
     command.add_argument("--size", default="1:1", help="Aspect ratio, auto, or exact WIDTHxHEIGHT; 9:16 = 1152x2048")
-    command.add_argument("--model", default="gpt-image-2")
+    command.add_argument("--model", default=DEFAULT_MODEL, help=f"Exact gateway model ID (default: {DEFAULT_MODEL}); no alias rewriting")
     command.add_argument("--fallback-model", help="Explicit one-time fallback, only for a structured model-unavailable error")
-    command.add_argument("--quality", choices=["auto", "low", "medium", "high"])
+    command.add_argument("--quality", choices=["auto", "low", "medium", "high", "xhigh", "max"])
+    command.add_argument("--complexity", choices=["low", "medium", "high"], help="Optional GPT Image 2.6 planning complexity; omitted unless requested")
     command.add_argument("--output-dir", type=Path, default=Path("storage/generated-images"))
     command.add_argument("--codex-home", help="Override CODEX_HOME / ~/.codex")
     command.add_argument("--provider", help="Select a named, explicitly configured provider")
+    command.add_argument("--profile", help="Use the same named Codex profile: <CODEX_HOME>/<name>.config.toml")
+    command.add_argument("--config-source", choices=["codex", "environment"], default="codex",
+                         help="Use Codex config by default; environment-only routing requires explicit selection")
     command.add_argument("--timeout", type=float, default=120, help="Socket timeout in seconds (default: 120)")
     command.add_argument("--max-retries", type=int, choices=range(3), default=0,
                          help="Opt into 0-2 retries on selected HTTP 429/5xx responses; POST retries may duplicate billing")
@@ -586,7 +653,7 @@ def main(argv: list[str] | None = None) -> int:
         if not args.model.strip() or (args.fallback_model is not None and not args.fallback_model.strip()):
             raise BridgeError("validation", "Model names must not be empty.")
         size = map_size(args.size)
-        config = load_gateway(resolve_codex_home(args.codex_home), args.provider)
+        config = load_gateway(resolve_codex_home(args.codex_home), args.provider, source=args.config_source, profile=args.profile)
         get_user_agent()
         if args.diagnose:
             if args.prompt or args.prompt_file or args.image or args.mode != "generate":
@@ -606,7 +673,8 @@ def main(argv: list[str] | None = None) -> int:
             images = load_images(args.image)
             endpoint = config.base_url + ("/images/edits" if args.mode == "edit" else "/images/generations")
             summary = {"version": VERSION, **config.summary(), "endpoint": endpoint, "mode": args.mode,
-                       "requested_model": args.model, "requested_size": size}
+                       "requested_model": args.model, "requested_size": size,
+                       "requested_quality": args.quality, "requested_complexity": args.complexity}
             if args.dry_run:
                 report = {"status": "dry_run", **summary, "reference_count": len(images), "prompt_characters": len(prompt),
                           "fallback_model": args.fallback_model, "max_retries": args.max_retries,
@@ -620,9 +688,11 @@ def main(argv: list[str] | None = None) -> int:
                     options = {"timeout": args.timeout, "max_retries": args.max_retries}
                     try:
                         if args.mode == "edit":
-                            response = call_image_edit(endpoint, config.api_key, model, prompt, images, size, args.quality, **options)
+                            response = call_image_edit(endpoint, config.api_key, model, prompt, images, size, args.quality,
+                                                       complexity=args.complexity, **options)
                         else:
-                            response = call_image_generate(endpoint, config.api_key, model, prompt, size, args.quality, **options)
+                            response = call_image_generate(endpoint, config.api_key, model, prompt, size, args.quality,
+                                                           complexity=args.complexity, **options)
                         request_attempts += response.attempts
                         break
                     except BridgeError as exc:

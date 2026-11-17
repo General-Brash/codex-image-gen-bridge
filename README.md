@@ -1,10 +1,23 @@
 # codex-image-gen-bridge
 
-**v1.1.0** · 用本机 Codex 配置调用 OpenAI-compatible Images API 的生图 Skill。
+**v1.2.0** · 用当前执行主机 Codex 配置调用 OpenAI-compatible Images API 的生图 Skill。
 支持文生图、多参考图编辑、离线预检和只读诊断，避免把第三方网关密钥误用到官方接口。
 
 > 这是自定义 Skill，不是 OpenAI 官方 SDK，也不会为会话注册原生 `image_gen` 工具。
 > 缺少原生工具不代表桥接不能用；桥接收到 502/503 也不代表修改 Skill 就能修好上游服务。
+
+## v1.2.0 默认模型与路由
+
+- 默认直接发送 `model: "gpt-image-2.6"`，不再依赖网关将 `gpt-image-2` 映射到新模型。
+- `gpt-image-2.6` 是此用户网关约定的请求 ID，不声称它是 OpenAI 官方通用别名。
+  官方 [图像 API 文档](https://developers.openai.com/api/docs/guides/image-generation#gpt-image-26)
+  列出 `gpt-image-2.6-flare` 和 `gpt-image-2.6-sunburst`；明确指定这些模型或其他 ID 时原样发送。
+- 默认 `--config-source codex`，每次重新读取当前 provider 的站点和凭据。
+  支持 `env_key`、provider 自带的 `experimental_bearer_token`、当前 `auth.json` 中的 API key。
+- 只有明确传入 `--config-source environment` 才启用独立环境变量地址与密钥，避免残留变量劫持默认路线。
+- 支持与 Codex 相同的命名 profile 文件，以及可选 `xhigh` / `max` 质量和 `--complexity`。
+- 自动发现 bridge，加上用户级 `AGENTS.md` 的生图偏好和竞争 skill 的启用设置，可建立持久默认路线。
+  详见 [全局路由配置](references/global-routing.md)；不是原生工具拦截器，也不会自动同步到其他主机。
 
 ## v1.1.0 修复重点
 
@@ -21,8 +34,8 @@
 ## 环境与安装
 
 - **Python 3.11+**，仅使用标准库，无需 `pip install`。
-- 一个实际支持 Images API 的网关，以及与该网关配套的 API key。
-- 通常读取 `~/.codex/config.toml` 和 `~/.codex/auth.json`；不会读取 OAuth token 充当 API key。
+- 一个实际支持所请求模型的 Images API 网关，以及与该网关配套的 API 凭据。
+- 通常读取 `~/.codex/config.toml`，按需读取 `~/.codex/auth.json`；不会读取 OAuth token 充当 API key。
 
 从仓库安装：
 
@@ -45,6 +58,8 @@ git clone https://github.com/General-Brash/codex-image-gen-bridge.git \
 ```
 
 Skill 更新未出现时，可重新打开 Codex。不要通过修改系统 `imagegen` Skill 来假装增加原生工具。
+需要普通生图也优先走此网关时，按 [全局路由配置](references/global-routing.md) 设置执行主机的
+用户级指令和 skills 开关。仅复制 skill 文件不会自动修改其他主机的偏好。
 
 ## 配置：地址和密钥必须配对
 
@@ -66,6 +81,8 @@ wire_api = "responses"
 ```
 
 `custom` 可以是任意 provider 名称，不必叫 `sub2api`。
+已有配置中 provider 的 `experimental_bearer_token` 也能直接使用，无需把它复制到 `auth.json`；
+新配置优先使用 `env_key`。配置了 `env_key` 却未设置对应变量时，明确报错，不改用其他凭据。
 `wire_api = "responses"` 是 Codex 文本模型的配置，不能证明图像端点是否可用；
 桥接仍使用 `/images/generations` 和 `/images/edits`。
 
@@ -78,12 +95,19 @@ env_key = "OTHER_GATEWAY_API_KEY"
 ```
 
 先在本机安全设置该环境变量，再传 `--provider other`。选择非当前 provider 时，
-桥接拒绝直接复用当前 `auth.json` 的密钥。没有指定 provider 时，只有唯一候选配置
+需要它自己的 `env_key` 或 `experimental_bearer_token`，桥接拒绝复用当前 `auth.json` 的密钥。
+没有指定 provider 时，只有唯一候选配置
 才能使用旧版兼容发现逻辑；有歧义就报错。
 
-**独立脚本环境**也可同时设置 `CODEX_IMAGE_BRIDGE_BASE_URL` 和
-`CODEX_IMAGE_BRIDGE_API_KEY`，作为完整的地址／凭据覆盖，不读取 Codex 配置文件。
-只设置其中一个会报错，且不能与 `--provider` 混用。
+Codex 使用命名配置时，传入相同的 `--profile NAME`，叠加
+`<CODEX_HOME>/<NAME>.config.toml`。脚本无法自动推断其他进程的 profile 或一次性 CLI 覆盖。
+Profile 切换站点时必须明确绑定对应凭据，不复用旧站点的 `auth.json` 或继承的密钥；
+新 bearer 与基础配置继承的 `env_key` 冲突时直接报错，建议为新站点使用独立 provider。
+
+**独立脚本环境**需要明确选择 `--config-source environment`，并同时设置
+`CODEX_IMAGE_BRIDGE_BASE_URL` 和 `CODEX_IMAGE_BRIDGE_API_KEY`，作为完整地址／凭据对。
+此模式不读取 Codex 配置文件，只设置其中一个会报错，且不能与 `--provider` / `--profile` 混用。
+默认 `codex` 模式忽略这两个环境变量，也不会因为 Codex 配置出错而自动改用它们。
 
 普通 SDK 的 `OPENAI_BASE_URL` / `OPENAI_API_KEY` 不会暗中覆盖本脚本配置；
 provider 可以通过 `env_key` 显式指定使用 `OPENAI_API_KEY`。
@@ -97,7 +121,7 @@ provider 可以通过 `env_key` 显式指定使用 `OPENAI_API_KEY`。
 
 ```bash
 python3 scripts/bridge.py \
-  --model gpt-image-2 --size 2048x1152 \
+  --model gpt-image-2.6 --size 2048x1152 \
   --output-dir "$HOME/Pictures/codex-images" \
   "A spring campus wallpaper, soft sunlight and cherry blossoms, no text."
 ```
@@ -112,7 +136,7 @@ python3 scripts/bridge.py \
   --image /absolute/reference-front.png \
   --image /absolute/reference-details.png \
   --prompt-file /absolute/prompt.txt \
-  --model gpt-image-2 --size 1152x2048 --quality high \
+  --model gpt-image-2.6 --size 1152x2048 --quality high \
   --output-dir "$HOME/Pictures/codex-images"
 ```
 
@@ -131,7 +155,7 @@ python3 scripts/bridge.py --dry-run --size 9:16 "A simple test prompt."
 ### 只读诊断：仅 GET /models
 
 ```bash
-python3 scripts/bridge.py --diagnose --model gpt-image-2
+python3 scripts/bridge.py --diagnose --model gpt-image-2.6
 ```
 
 此操作不会生图、不会上传参考图。模型列表里有某个名字，不保证它的上游可用；
@@ -160,13 +184,16 @@ python3 scripts/bridge.py --model requested-image-model \
 | `prompt` / `--prompt-file` | 二选一 | 提示词或 UTF-8 提示词文件；诊断模式不需要 |
 | `--mode` | `generate` | `generate` 文生图或 `edit` 参考图编辑 |
 | `--image` | 无 | 可重复的本地图片路径或 data URL，仅用于编辑 |
-| `--model` | `gpt-image-2` | 原样请求指定模型，不自动迁移别名 |
+| `--model` | `gpt-image-2.6` | 原样请求指定网关模型 ID，不自动迁移别名 |
 | `--fallback-model` | 无 | 明确授权的单次、条件式模型回退 |
 | `--size` | `1:1` | 比例别名、`auto` 或明确 `WIDTHxHEIGHT` |
-| `--quality` | 不发送 | 可选 `auto` / `low` / `medium` / `high`，由网关验证支持情况 |
+| `--quality` | 不发送 | 可选 `auto` / `low` / `medium` / `high` / `xhigh` / `max` |
+| `--complexity` | 不发送 | 可选 `low` / `medium` / `high`，由模型和网关验证支持情况 |
 | `--output-dir` | `storage/generated-images` | 保存生成图片，不覆盖已有文件 |
 | `--codex-home` | 自动发现 | 优先于 `CODEX_HOME` 和用户主目录 |
 | `--provider` | 当前 provider | 指定配置中的 provider，需匹配其凭据 |
+| `--profile` | 无 | 与 Codex 会话相同的 `<CODEX_HOME>/<NAME>.config.toml` |
+| `--config-source` | `codex` | 只有显式选择 `environment` 才绕过 Codex 配置 |
 | `--timeout` | `120` | socket 超时秒数，最大 `900`，不是整个任务的总时限 |
 | `--max-retries` | `0` | HTTP 重试次数，最多 `2`，需明确承担重复调用风险 |
 | `--dry-run` | 关闭 | 纯离线配置／输入检查 |
@@ -196,8 +223,8 @@ python3 scripts/bridge.py --model requested-image-model \
 ```json
 {
   "status": "ok",
-  "version": "1.1.0",
-  "model": "gpt-image-2",
+  "version": "1.2.0",
+  "model": "gpt-image-2.6",
   "requested_size": "1152x2048",
   "file": "/absolute/output/codex-image-example.png",
   "content_type": "image/png",
@@ -212,13 +239,15 @@ python3 scripts/bridge.py --model requested-image-model \
 - URL 响应只返回远程地址，不自动下载、不携带 API 凭据访问图片服务器；实际尺寸为 `null`。
 - 原始响应、Base64 和改写后的提示词不进入输出。
 - 失败向 stderr 输出 JSON 并以退出码 `1` 结束，不再把空结果当成功。
+- `requested_model` / `model` 描述客户端请求的模型，不证明网关实际使用了相同上游模型；
+  有服务器映射时，仍需核对网关日志中的实际模型和映射链。
 
 示例错误：
 
 ```json
 {
   "status": "error",
-  "version": "1.1.0",
+  "version": "1.2.0",
   "error": {
     "kind": "upstream_unavailable",
     "message": "No available upstream account",

@@ -1,6 +1,11 @@
 # Python
 __pycache__/
 *.py[cod]
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
 
 # Local macOS files
 .DS_Store
@@ -9,6 +14,8 @@ __pycache__/
 .env
 .env.*
 !.env.example
+.codex/
+*.log
 
 # Generated image output
 storage/generated-images/
@@ -18,6 +25,7 @@ outputs/
 # Private configuration and release/build outputs
 auth.json
 config.toml
+*.config.toml
 *.pem
 *.key
 output/

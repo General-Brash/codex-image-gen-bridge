@@ -149,11 +149,11 @@ wire_api = "responses"
         for pair in [{bridge.API_KEY_ENV: KEY}, {bridge.BASE_URL_ENV: "https://override.example"}]:
             with self.subTest(pair=list(pair)), patch.dict(os.environ, pair):
                 with self.assertRaisesRegex(bridge.BridgeError, "together"):
-                    bridge.load_gateway(self.home)
+                    bridge.load_gateway(self.home, source="environment")
         with patch.dict(os.environ, {bridge.API_KEY_ENV: KEY, bridge.BASE_URL_ENV: "https://override.example"}):
-            self.assertEqual(bridge.load_gateway(self.root / "nonexistent").base_url, "https://override.example/v1")
+            self.assertEqual(bridge.load_gateway(self.root / "nonexistent", source="environment").base_url, "https://override.example/v1")
             with self.assertRaisesRegex(bridge.BridgeError, "--provider"):
-                bridge.load_gateway(self.home, "custom")
+                bridge.load_gateway(self.home, "custom", source="environment")
 
     def test_sdk_environment_does_not_change_gateway_pair(self):
         with patch.dict(os.environ, {"OPENAI_API_KEY": "unrelated-test-key", "OPENAI_BASE_URL": "https://api.openai.com/v1"}):
@@ -371,7 +371,7 @@ wire_api = "responses"
         with patch.object(bridge.time, "sleep"):
             error, opener = self.failure(["--max-retries", "2", "--fallback-model", "backup", "prompt"], failures)
         self.assertEqual(opener.open.call_count, 3)
-        self.assertEqual(error["error"]["attempted_models"], ["gpt-image-2"])
+        self.assertEqual(error["error"]["attempted_models"], [bridge.DEFAULT_MODEL])
 
     def test_model_fallback_requires_explicit_opt_in_and_structured_signal(self):
         unavailable = {"error": {"code": "model_not_found", "message": "No such model"}}
@@ -405,7 +405,7 @@ wire_api = "responses"
         self.assertEqual(raised.exception.kind, "redirect_blocked")
 
     def test_diagnose_is_get_only_and_does_not_infer_generation_support(self):
-        for entries, listed in [([{"id": "text-model"}], False), ([{"id": "gpt-image-2"}], True)]:
+        for entries, listed in [([{"id": "text-model"}], False), ([{"id": bridge.DEFAULT_MODEL}], True)]:
             with self.subTest(listed=listed):
                 data, opener = self.success(["--diagnose"], [Response({"data": entries})])
                 request = opener.open.call_args.args[0]

@@ -1,5 +1,14 @@
 # Changelog
 
+## v1.2.0 - 2026-11-17
+
+- Request gpt-image-2.6 by default; preserve explicit model IDs without alias rewriting or automatic downgrades.
+- Make Codex configuration the default source; require explicit environment-only selection to bypass it.
+- Support the selected provider's experimental_bearer_token without extracting ChatGPT OAuth tokens.
+- Support named Codex profile file overlays, optional xhigh/max quality, and planning complexity.
+- Declare implicit invocation and document persistent user-level gateway-first image routing.
+- Add offline request and configuration regression tests to the installed skill.
+
 ## v1.1.0 — 2026-09-10
 
 - Fix active-provider and credential discovery using TOML and explicit credential binding.
